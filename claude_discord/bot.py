@@ -93,10 +93,18 @@ class ClaudeDiscordBot(commands.Bot):
 
             asyncio.create_task(self._cleanup_orphaned_worktrees())
 
-        # Sync slash commands
+        # Sync slash commands per-guild for instant availability.
+        # Global-only sync (the old approach) can take up to 1 hour to propagate.
         try:
-            synced = await self.tree.sync()
-            logger.info("Synced %d slash commands", len(synced))
+            for guild in self.guilds:
+                self.tree.copy_global_to(guild=guild)
+                synced = await self.tree.sync(guild=guild)
+                logger.info(
+                    "Synced %d slash commands to guild %s (%d)",
+                    len(synced),
+                    guild.name,
+                    guild.id,
+                )
         except Exception:
             logger.exception("Failed to sync slash commands")
 
