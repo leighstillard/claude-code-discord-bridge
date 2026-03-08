@@ -1,7 +1,8 @@
-"""Emoji reaction status manager.
+"""Status manager for tracking Claude's activity state.
 
-Inspired by OpenClaw's approach: use message reactions to show agent status.
-Debounced to avoid Discord API rate limits.
+Tracks internal status (thinking, tool use, stall detection) without
+adding emoji reactions to Discord messages — reactions on user messages
+trigger push notifications that can't be suppressed via Discord settings.
 """
 
 from __future__ import annotations
@@ -57,10 +58,10 @@ def _stall_thresholds(model: str | None) -> tuple[int, int]:
 
 
 class StatusManager:
-    """Manages emoji reactions on a Discord message to show Claude's status.
+    """Tracks Claude's activity state with stall detection.
 
-    Only one status emoji is shown at a time. Transitions are debounced
-    to avoid hitting Discord's rate limits.
+    Status transitions are tracked internally (no Discord reactions) so
+    that stall detection can fire the ``on_hard_stall`` callback.
     """
 
     def __init__(
@@ -95,8 +96,6 @@ class StatusManager:
         """Set status to done."""
         self._cancel_stall_timer()
         await self._set_status(EMOJI_DONE)
-        # Hold done emoji briefly, then clean up
-        await asyncio.sleep(1.5)
         await self.cleanup()
 
     async def set_compact(self) -> None:
@@ -108,21 +107,14 @@ class StatusManager:
         """Set status to error."""
         self._cancel_stall_timer()
         await self._set_status(EMOJI_ERROR)
-        # Hold error emoji longer
-        await asyncio.sleep(2.5)
         await self.cleanup()
 
     async def cleanup(self) -> None:
-        """Remove all status reactions."""
+        """Cancel pending tasks and reset state."""
         self._cancel_stall_timer()
         if self._debounce_task and not self._debounce_task.done():
             self._debounce_task.cancel()
-        if self._current_emoji:
-            with contextlib.suppress(discord.HTTPException, AttributeError):
-                guild = self._message.guild
-                if guild:
-                    await self._message.remove_reaction(self._current_emoji, guild.me)
-            self._current_emoji = None
+        self._current_emoji = None
 
     async def _set_status(self, emoji: str) -> None:
         """Set the target emoji with debouncing."""
@@ -134,25 +126,15 @@ class StatusManager:
         self._debounce_task = asyncio.create_task(self._apply_debounced())
 
     async def _apply_debounced(self) -> None:
-        """Apply the status change after debounce delay."""
+        """Apply the status change after debounce delay.
+
+        Updates internal state only — no Discord reactions are sent.
+        """
         await asyncio.sleep(DEBOUNCE_MS / 1000)
 
         async with self._lock:
             if self._target_emoji == self._current_emoji:
                 return
-
-            # Remove old emoji
-            if self._current_emoji:
-                with contextlib.suppress(discord.HTTPException, AttributeError):
-                    guild = self._message.guild
-                    if guild:
-                        await self._message.remove_reaction(self._current_emoji, guild.me)
-
-            # Add new emoji
-            if self._target_emoji:
-                with contextlib.suppress(discord.HTTPException):
-                    await self._message.add_reaction(self._target_emoji)
-
             self._current_emoji = self._target_emoji
 
     def _start_stall_timer(self) -> None:
